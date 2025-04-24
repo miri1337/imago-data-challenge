@@ -1,4 +1,4 @@
-### Tools and Reproduction Steps
+# Tools and Reproduction Steps
 
 Follow these steps to replicate and verify the results presented in this analysis.
 
@@ -8,7 +8,7 @@ Follow these steps to replicate and verify the results presented in this analysi
 - **Git** installed
 - **Python** (v3.11 used)
 
-#### Step-by-Step Instructions
+#### Instruction
 
 1. **Clone the Repository:**
 
@@ -17,7 +17,13 @@ git clone https://github.com/miri1337/imago-data-challenge.git
 cd imago-data-challenge
 ```
 
-2. **Start SQL Server in Docker:**
+2. **Put the CSVs with data to imago-data-challenge/data**
+
+3. **Set SQL Server password in docker-compose.yml**
+
+Replace placeholder value with your password.
+
+4. **Start SQL Server in Docker:**
 
 ```bash
 docker-compose up -d
@@ -29,7 +35,7 @@ Check if SQL Server is running:
 docker ps
 ```
 
-3. **Setup Python Environment:**
+5. **Setup Python Environment:**
 
 ```bash
 python -m venv venv
@@ -39,7 +45,7 @@ venv\Scripts\activate     # Windows
 pip install -r requirements.txt
 ```
 
-4. **Data Import to SQL Server:**
+6. **Data Import to SQL Server:**
 
 Run the Jupyter Notebook responsible for importing CSV data into the database:
 
@@ -47,7 +53,7 @@ Run the Jupyter Notebook responsible for importing CSV data into the database:
 jupyter notebook notebooks/analysis.ipynb
 ```
 
-### Data Analysis & Understanding
+# Data Analysis & Understanding
 
 #### Purpose
 The goal here was to dive into the data provided, check its quality, and pinpoint any critical issues that might be impacting our revenue reporting.
@@ -75,7 +81,7 @@ First, I did some basic checks for missing values and duplicates to get a feel f
     - Region: 321 missing (potentially problematic if regional analysis is required)
   - No duplicate customer IDs
 
-#### Deep Dive into Issues
+#### Current Issues
 After initial checks, I ran deeper SQL analyses (see Jupyter notebook for SQL queries) to uncover significant data problems:
 
 1. **Positions Linked to Invoices Without Payments**
@@ -90,7 +96,7 @@ After initial checks, I ran deeper SQL analyses (see Jupyter notebook for SQL qu
    - **Total Count:** Only 2 invoices
    - **Analysis:** Although the count is minimal, this points to possible process lapses, as invoices typically should always be linked to one or more positions. This needs to be addressed to ensure data consistency.
 
-#### Observations & Next Steps
+#### Observations
 - **Data Quality Concerns:** It's clear that there are significant issues that will skew revenue and financial reports. The volume of unpaid invoices and improperly classified revenue is alarming.
 - **Operational Implications:** These issues will cause unreliable financial reporting, directly impacting business decision-making.
 - **Recommended Immediate Actions:**
@@ -98,7 +104,7 @@ After initial checks, I ran deeper SQL analyses (see Jupyter notebook for SQL qu
   - Coordinate closely with finance and operational teams to address these issues at their sources.
   - Consider implementing automated data-quality checks and alerts to catch these issues earlier.
 
-### Pipeline Proposal
+# Pipeline Proposal
 
 #### Understanding the Problem
 The analysis clearly highlights that issues with data quality, particularly regarding missing payments, placeholder media identifiers, and inconsistent customer information, are causing inaccuracies in our revenue reporting. After examining the data closely, it’s clear that these issues originate from how data is entered and processed through our current ETL pipeline.
@@ -155,7 +161,7 @@ To enhance the reliability, transparency, and accuracy of the data pipeline, the
       OR KdNr IS NULL OR KdNr NOT IN (SELECT DISTINCT KdNr FROM Abrechnung_Kunden);
    ```
 
-   - Automate these checks and create a dedicated logging mechanism to handle problematic records. Any records failing these checks should trigger alerts to the responsible teams, prompting immediate review and correction.
+   - Automate these checks and create a dedicated logging mechanism to handle problematic records. Any records failing these checks should trigger alerts to the responsible teams.
 
 #### Recommended Data Model Adjustments
 
@@ -207,6 +213,147 @@ To successfully implement these changes, recommended discussions:
 #### Next Steps
 - Start with phased implementation to minimize operational disruption.
 - Continuously monitor, review, and adjust the process based on real-time feedback and results.
+
+# Modern Tooling Strategy
+
+### Overview
+To modernize the existing SSIS-based ETL pipeline and build a future-proof data infrastructure, I propose a phased migration to a modern data stack based on dbt (Data Build Tool), Apache Airflow, and optionally Snowflake. The aim is to improve maintainability, scalability, transparency, and developer experience, while reducing risk of errors in revenue reporting.
+
+## Migration Strategy
+
+### 1. dbt (Data Build Tool)
+**Purpose:** Transform raw data into structured, validated models using SQL. dbt brings version control, modular logic, and automated data testing.
+
+**Implementation Plan:**
+- Replace existing SSIS transformation logic with modular dbt models.
+- Define staging, intermediate, and mart layers for greater clarity and traceability.
+- Introduce `dbt tests` for nulls, unique constraints, and referential integrity.
+
+**Detailed Example of dbt Models:**
+
+#### `models/staging/stg_invoices.sql`
+```sql
+SELECT
+    ReNummer AS invoice_id,
+    KdNr AS customer_id,
+    Zahlungsdatum,
+    ZahlungsbetragBrutto,
+    SummeNetto,
+    MwStSatz,
+    Summenebenkosten
+FROM {{ source('raw', 'invoices') }}
+```
+
+#### `models/staging/stg_positions.sql`
+```sql
+SELECT
+    id AS position_id,
+    ReId AS invoice_id,
+    KdNr AS customer_id,
+    Nettobetrag,
+    Bildnummer,
+    VerDatum
+FROM {{ source('raw', 'positions') }}
+```
+
+#### `models/intermediate/int_flagged_positions.sql`
+```sql
+SELECT *,
+    CASE WHEN Bildnummer = 100000000 THEN TRUE ELSE FALSE END AS is_placeholder_media
+FROM {{ ref('stg_positions') }}
+```
+
+#### `models/intermediate/int_missing_payments.sql`
+```sql
+SELECT *,
+    CASE WHEN Zahlungsdatum IS NULL OR ZahlungsbetragBrutto IS NULL THEN TRUE ELSE FALSE END AS is_payment_missing
+FROM {{ ref('stg_invoices') }}
+```
+
+#### `models/marts/revenue_metrics.sql`
+```sql
+SELECT
+    c.Verlagsname,
+    c.Region,
+    i.invoice_id,
+    p.Nettobetrag,
+    p.is_placeholder_media,
+    i.is_payment_missing
+FROM {{ ref('int_missing_payments') }} i
+JOIN {{ ref('int_flagged_positions') }} p ON i.invoice_id = p.invoice_id
+JOIN {{ ref('stg_customers') }} c ON i.customer_id = c.Kdnr
+```
+
+**Folder Structure:**
+```
+dbt/
+├── models/
+│   ├── staging/
+│   │   └── stg_*.sql
+│   ├── intermediate/
+│   │   └── int_*.sql
+│   └── marts/
+│       └── revenue_metrics.sql
+├── seeds/
+├── snapshots/
+├── dbt_project.yml
+├── tests/
+│   └── schema.yml  # constraints, referential tests
+```
+
+### 2. Apache Airflow
+**Purpose:** Schedule and orchestrate tasks and dependencies with observability.
+
+**How to Use It:**
+- Use DAGs to schedule file ingestion, dbt model runs, and validations.
+- Implement alerting for task failures or validation anomalies.
+- Enable retries, conditional logic, and SLA monitoring.
+
+**Proposed DAG Flow:**
+```
+start → ingest_raw_csv → run_dbt_staging → run_dbt_marts → run_tests → notify_teams
+```
+
+### 3. Snowflake (Optional Future Move)
+**Purpose:** Replace SQL Server with a scalable cloud-native data warehouse.
+
+**Migration Plan:**
+- Mirror core tables from SQL Server into Snowflake using CDC or batch replication.
+- Compare query performance, run cost benchmarks.
+- Gradually switch dbt's target to Snowflake for transformation models.
+
+**Why Consider Snowflake:**
+- Decouples compute and storage.
+- Integrates well with dbt and Airflow.
+- Reduces on-prem maintenance.
+
+
+## What Should Stay for Now
+- **Data ingestion from flat files (CSV/Excel):** Still necessary until upstream systems are upgraded.
+- **SQL Server as storage:** Can remain during transition. Migration to Snowflake should only occur after validation.
+- **Manual overrides:** Business rules for handling missing or incorrect data will still need some manual input and oversight during early phases.
+
+
+### Risks and Mitigations
+
+**1. Disrupting Existing Reporting**
+- Risk: Changing logic could break existing dashboards.
+- Mitigation: Run new pipeline in parallel for validation before switching production.
+
+**2. Cloud Costs (Snowflake)**
+- Risk: Unmanaged compute use can lead to high costs.
+- Mitigation: Use role-based access, auto-suspend warehouses, and strict resource monitoring.
+
+**3. Migrating Bad Data**
+- Risk: Garbage data may get migrated.
+- Mitigation: Use dbt tests and validation layers to prevent contaminated data from reaching reporting systems.
+
+---
+
+### Summary
+Switching to dbt and Airflow improves modularity, tracking, and data quality right away. Adding Snowflake helps scale and cuts down on maintenance. With a solid plan for models, DAGs, and validation, the move can happen gradually without disrupting key reports.
+
+
 
 
 
